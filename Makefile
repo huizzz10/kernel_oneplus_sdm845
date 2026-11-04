@@ -724,6 +724,11 @@ ifdef CONFIG_CC_WERROR
 KBUILD_CFLAGS  += -Werror
 endif
 
+# BakaSU's preinit fallback (drivers/kernelsu/preinit/preinit.h) has a stray
+# `return` in a void stub. Keep that warning from failing the build until it
+# is fixed upstream.
+KBUILD_CFLAGS	+= $(call cc-option,-Wno-error=return-mismatch)
+
 # Tell gcc to never replace conditional load with a non-conditional one
 KBUILD_CFLAGS	+= $(call cc-option,--param=allow-store-data-races=0)
 KBUILD_CFLAGS	+= $(call cc-option,-fno-allow-store-data-races)
