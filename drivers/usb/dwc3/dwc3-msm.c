@@ -365,6 +365,9 @@ struct dwc3_msm {
 	dma_addr_t		dummy_gsi_db_dma;
 	int			orientation_override;
 	bool			usb_data_enabled;
+	struct delayed_work	vbus_sync_work;
+	bool			vbus_pending_valid;
+	bool			vbus_pending_state;
 };
 
 #define USB_HSPHY_3P3_VOL_MIN		3050000 /* uV */
@@ -2556,6 +2559,7 @@ static int dwc3_msm_suspend(struct dwc3_msm *mdwc, bool enable_wakeup)
 	}
 
 	cancel_delayed_work_sync(&mdwc->perf_vote_work);
+	cancel_delayed_work_sync(&mdwc->vbus_sync_work);
 	msm_dwc3_perf_vote_update(mdwc, false);
 
 	if (!mdwc->in_host_mode) {
@@ -2764,6 +2768,10 @@ static int dwc3_msm_resume(struct dwc3_msm *mdwc)
 	struct usb_irq *uirq;
 
 	dev_dbg(mdwc->dev, "%s: exiting lpm\n", __func__);
+
+	/* re-check the cable state after resuming */
+	schedule_delayed_work(&mdwc->vbus_sync_work,
+			      msecs_to_jiffies(2000));
 
 	/*
 	 * If h/w exited LPM without any events, ensure
@@ -3399,6 +3407,9 @@ static int dwc3_msm_vbus_notifier(struct notifier_block *nb,
 			dwc3_msm_gadget_vbus_draw(mdwc, 500);
 		else
 			dwc3_msm_gadget_vbus_draw(mdwc, 0);
+		/* remember the event so it can be replayed when re-enabled */
+		mdwc->vbus_pending_valid = true;
+		mdwc->vbus_pending_state = !!event;
 		return NOTIFY_DONE;
 	}
 
@@ -3457,6 +3468,8 @@ static int dwc3_msm_extcon_register(struct dwc3_msm *mdwc)
 	if (!mdwc->extcon)
 		return -ENOMEM;
 
+	mdwc->extcon_cnt = extcon_cnt;
+
 	for (idx = 0; idx < extcon_cnt; idx++) {
 		edev = extcon_get_edev_by_phandle(mdwc->dev, idx);
 		if (IS_ERR(edev) && PTR_ERR(edev) != -ENODEV)
@@ -3506,6 +3519,46 @@ static int dwc3_msm_extcon_register(struct dwc3_msm *mdwc)
 	}
 
 	return 0;
+}
+
+static void dwc3_msm_sync_extcon_state(struct dwc3_msm *mdwc)
+{
+	int idx;
+
+	if (!mdwc->extcon || mdwc->extcon_cnt <= 0)
+		return;
+
+	for (idx = 0; idx < mdwc->extcon_cnt; idx++) {
+		struct extcon_dev *edev = mdwc->extcon[idx].edev;
+		int vbus, id;
+
+		if (!edev)
+			continue;
+
+		vbus = extcon_get_state(edev, EXTCON_USB);
+		if (vbus < 0)
+			vbus = mdwc->vbus_pending_valid ?
+				mdwc->vbus_pending_state : 0;
+
+		id = extcon_get_state(edev, EXTCON_USB_HOST);
+		if (id < 0)
+			id = 0;
+
+		dwc3_msm_vbus_notifier(&mdwc->extcon[idx].vbus_nb,
+					!!vbus, edev);
+		dwc3_msm_id_notifier(&mdwc->extcon[idx].id_nb,
+					!!id, edev);
+	}
+
+	mdwc->vbus_pending_valid = false;
+}
+
+static void dwc3_msm_vbus_sync_work(struct work_struct *work)
+{
+	struct dwc3_msm *mdwc = container_of(work, struct dwc3_msm,
+					     vbus_sync_work.work);
+
+	dwc3_msm_sync_extcon_state(mdwc);
 }
 
 static ssize_t orientation_show(struct device *dev,
@@ -3757,6 +3810,9 @@ static ssize_t usb_data_enabled_store(struct device *dev,
 		mdwc->vbus_active = false;
 		mdwc->id_state = DWC3_ID_FLOAT;
 		dwc3_ext_event_notify(mdwc);
+	} else {
+		/* replay the state that was dropped while disabled */
+		dwc3_msm_sync_extcon_state(mdwc);
 	}
 
 	return count;
@@ -3787,6 +3843,7 @@ static int dwc3_msm_probe(struct platform_device *pdev)
 	INIT_DELAYED_WORK(&mdwc->sm_work, dwc3_otg_sm_work);
 	INIT_DELAYED_WORK(&mdwc->perf_vote_work, msm_dwc3_perf_vote_work);
 	INIT_DELAYED_WORK(&mdwc->sdp_check, check_for_sdp_connection);
+	INIT_DELAYED_WORK(&mdwc->vbus_sync_work, dwc3_msm_vbus_sync_work);
 
 	mdwc->dwc3_wq = alloc_ordered_workqueue("dwc3_wq", 0);
 	if (!mdwc->dwc3_wq) {
@@ -4084,6 +4141,14 @@ static int dwc3_msm_probe(struct platform_device *pdev)
 			goto put_dwc3;
 
 		/*
+		 * The PD engine may still be coming up at this point. Re-read
+		 * the cable state once it has settled so that a cable already
+		 * plugged in at boot time is not missed.
+		 */
+		schedule_delayed_work(&mdwc->vbus_sync_work,
+				      msecs_to_jiffies(2000));
+
+		/*
 		 * dpdm regulator will be turned on to perform apsd
 		 * (automatic power source detection). dpdm regulator is
 		 * used to float (or high-z) dp/dm lines. Do not reset
@@ -4199,6 +4264,7 @@ static int dwc3_msm_remove(struct platform_device *pdev)
 	cancel_delayed_work_sync(&mdwc->perf_vote_work);
 	msm_dwc3_perf_vote_update(mdwc, false);
 	cancel_delayed_work_sync(&mdwc->sm_work);
+	cancel_delayed_work_sync(&mdwc->vbus_sync_work);
 
 	if (mdwc->hs_phy)
 		mdwc->hs_phy->flags &= ~PHY_HOST_MODE;
