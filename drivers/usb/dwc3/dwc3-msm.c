@@ -338,6 +338,7 @@ struct dwc3_msm {
 
 	struct extcon_nb	*extcon;
 	int			ext_idx;
+	int			extcon_cnt;
 	struct notifier_block	host_nb;
 
 	atomic_t                in_p3;

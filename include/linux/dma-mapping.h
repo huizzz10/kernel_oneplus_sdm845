@@ -201,7 +201,7 @@ extern const struct dma_map_ops dma_direct_ops;
 extern const struct dma_map_ops dma_noncoherent_ops;
 extern const struct dma_map_ops dma_virt_ops;
 
-#define DMA_BIT_MASK(n)	(((n) == 64) ? ~0ULL : ((1ULL<<(n))-1))
+#define DMA_BIT_MASK(n)	(~0ULL >> (64 - (n)))
 
 #define DMA_MASK_NONE	0x0ULL
 
