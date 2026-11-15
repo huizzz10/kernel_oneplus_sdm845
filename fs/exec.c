@@ -1728,6 +1728,13 @@ static int exec_binprm(struct linux_binprm *bprm)
 /*
  * sys_execve() executes a new program.
  */
+#ifdef CONFIG_KSU_MANUAL_HOOK
+extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
+				void *argv, void *envp, int *flags);
+extern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr,
+				void *argv, void *envp, int *flags, int *retval);
+#endif
+
 static int __do_execve_file(int fd, struct filename *filename,
 			    struct user_arg_ptr argv,
 			    struct user_arg_ptr envp,
@@ -1740,6 +1747,11 @@ static int __do_execve_file(int fd, struct filename *filename,
 
 	if (IS_ERR(filename))
 		return PTR_ERR(filename);
+
+#ifdef CONFIG_KSU_MANUAL_HOOK
+	if (filename)
+		ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+#endif
 
 	/*
 	 * We move the actual failure in case of RLIMIT_NPROC excess from
@@ -1866,6 +1878,11 @@ static int __do_execve_file(int fd, struct filename *filename,
 	task_numa_free(current, false);
 	free_bprm(bprm);
 	kfree(pathbuf);
+#ifdef CONFIG_KSU_MANUAL_HOOK
+	if (filename)
+		ksu_handle_post_execveat(&fd, &filename, &argv, &envp,
+					&flags, &retval);
+#endif
 	if (filename)
 		putname(filename);
 	if (displaced)
@@ -1890,6 +1907,11 @@ out_files:
 	if (displaced)
 		reset_files_struct(displaced);
 out_ret:
+#ifdef CONFIG_KSU_MANUAL_HOOK
+	if (filename)
+		ksu_handle_post_execveat(&fd, &filename, &argv, &envp,
+					&flags, &retval);
+#endif
 	if (filename)
 		putname(filename);
 	return retval;
