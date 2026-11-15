@@ -252,6 +252,8 @@ struct extcon_nb {
 	struct notifier_block	vbus_nb;
 	struct notifier_block	id_nb;
 	struct notifier_block	blocking_sync_nb;
+	bool			vbus_registered;
+	bool			id_registered;
 };
 
 /* Input bits to state machine (mdwc->inputs) */
@@ -369,6 +371,7 @@ struct dwc3_msm {
 	struct delayed_work	vbus_sync_work;
 	bool			vbus_pending_valid;
 	bool			vbus_pending_state;
+	int			vbus_pending_idx;
 };
 
 #define USB_HSPHY_3P3_VOL_MIN		3050000 /* uV */
@@ -3411,6 +3414,7 @@ static int dwc3_msm_vbus_notifier(struct notifier_block *nb,
 		/* remember the event so it can be replayed when re-enabled */
 		mdwc->vbus_pending_valid = true;
 		mdwc->vbus_pending_state = !!event;
+		mdwc->vbus_pending_idx = enb->idx;
 		return NOTIFY_DONE;
 	}
 
@@ -3492,12 +3496,16 @@ static int dwc3_msm_extcon_register(struct dwc3_msm *mdwc)
 						&mdwc->extcon[idx].vbus_nb);
 		if (ret < 0)
 			check_vbus_state = false;
+		else
+			mdwc->extcon[idx].vbus_registered = true;
 
 		mdwc->extcon[idx].id_nb.notifier_call = dwc3_msm_id_notifier;
 		ret = extcon_register_notifier(edev, EXTCON_USB_HOST,
 						&mdwc->extcon[idx].id_nb);
 		if (ret < 0)
 			check_id_state = false;
+		else
+			mdwc->extcon[idx].id_registered = true;
 
 		mdwc->extcon[idx].blocking_sync_nb.notifier_call =
 					dwc3_usb_blocking_sync;
@@ -3522,6 +3530,17 @@ static int dwc3_msm_extcon_register(struct dwc3_msm *mdwc)
 	return 0;
 }
 
+/*
+ * The EUD extcon is a debug interface: it only reports spoofed
+ * connect/disconnect requests and never reflects the real cable state.
+ */
+static bool dwc3_msm_extcon_is_eud(struct extcon_dev *edev)
+{
+	const char *name = extcon_get_edev_name(edev);
+
+	return name && strnstr(name, "eud", strlen(name)) != NULL;
+}
+
 static void dwc3_msm_sync_extcon_state(struct dwc3_msm *mdwc)
 {
 	int idx;
@@ -3529,26 +3548,44 @@ static void dwc3_msm_sync_extcon_state(struct dwc3_msm *mdwc)
 	if (!mdwc->extcon || mdwc->extcon_cnt <= 0)
 		return;
 
+	/*
+	 * Nothing can be replayed into the state machine while USB data is
+	 * disabled, and the notifiers below would only overwrite the pending
+	 * event with the current one before it is cleared. Keep it for the
+	 * moment the data path is enabled again.
+	 */
+	if (!mdwc->usb_data_enabled)
+		return;
+
 	for (idx = 0; idx < mdwc->extcon_cnt; idx++) {
-		struct extcon_dev *edev = mdwc->extcon[idx].edev;
+		struct extcon_nb *enb = &mdwc->extcon[idx];
+		struct extcon_dev *edev = enb->edev;
 		int vbus, id;
 
-		if (!edev)
+		if (!edev || dwc3_msm_extcon_is_eud(edev))
 			continue;
 
-		vbus = extcon_get_state(edev, EXTCON_USB);
-		if (vbus < 0)
-			vbus = mdwc->vbus_pending_valid ?
-				mdwc->vbus_pending_state : 0;
+		/*
+		 * Only replay the signals this extcon really provides.  A
+		 * provider that does not carry a cable returns -EINVAL, and
+		 * turning that into 0 would fake an ID float / VBUS drop and
+		 * tear down an already running host or peripheral session.
+		 */
+		if (enb->vbus_registered) {
+			vbus = extcon_get_state(edev, EXTCON_USB);
+			if (vbus < 0)
+				vbus = (mdwc->vbus_pending_valid &&
+					mdwc->vbus_pending_idx == idx) ?
+					mdwc->vbus_pending_state : 0;
+			dwc3_msm_vbus_notifier(&enb->vbus_nb, !!vbus, edev);
+		}
 
-		id = extcon_get_state(edev, EXTCON_USB_HOST);
-		if (id < 0)
-			id = 0;
-
-		dwc3_msm_vbus_notifier(&mdwc->extcon[idx].vbus_nb,
-					!!vbus, edev);
-		dwc3_msm_id_notifier(&mdwc->extcon[idx].id_nb,
-					!!id, edev);
+		if (enb->id_registered) {
+			id = extcon_get_state(edev, EXTCON_USB_HOST);
+			/* unknown state: leave the current one untouched */
+			if (id >= 0)
+				dwc3_msm_id_notifier(&enb->id_nb, !!id, edev);
+		}
 	}
 
 	mdwc->vbus_pending_valid = false;
