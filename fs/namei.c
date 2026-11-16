@@ -3857,11 +3857,6 @@ static int do_o_path(struct nameidata *nd, unsigned flags, struct file *file)
 static struct file *path_openat(struct nameidata *nd,
 			const struct open_flags *op, unsigned flags)
 {
-#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-	int old_dfd = nd->dfd;
-	struct filename *fake_filename = NULL;
-	struct filename *old_name = nd->name;
-#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
 	struct file *file;
 	int error;
 
@@ -3880,33 +3875,8 @@ static struct file *path_openat(struct nameidata *nd,
 			nd->flags &= ~(LOOKUP_OPEN|LOOKUP_CREATE|LOOKUP_EXCL);
 			s = trailing_symlink(nd);
 		}
-#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-		if (!error && old_dfd != -1 &&
-			SUSFS_IS_INODE_OPEN_REDIRECT_WITHOUT_UID_CHECK(nd->path.dentry->d_inode))
-		{
-			fake_filename = susfs_open_redirect_spoof_do_sys_openat(nd->path.dentry->d_inode);
-			if (fake_filename && !IS_ERR(fake_filename)) {
-				const char *new_s = NULL;
-				terminate_walk(nd);
-				restore_nameidata();
-				set_nameidata(nd, old_dfd, fake_filename);
-				new_s = path_init(nd, flags);
-				while (!(error = link_path_walk(new_s, nd)) &&
-					(error = do_last(nd, file, op)) > 0) {
-					nd->flags &= ~(LOOKUP_OPEN|LOOKUP_CREATE|LOOKUP_EXCL);
-					new_s = trailing_symlink(nd);
-				}
-			}
-		}
-#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
 		terminate_walk(nd);
 	}
-#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-	if (fake_filename && !IS_ERR(fake_filename)) {
-		nd->name = old_name;
-		putname(fake_filename);
-	}
-#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
 	if (likely(!error)) {
 		if (likely(file->f_mode & FMODE_OPENED))
 			return file;
@@ -3927,7 +3897,7 @@ static struct file *path_openat(struct nameidata *nd,
 extern int susfs_open_redirect_spoof_vfs_readlink(struct inode *inode, char __user *buffer, int buflen);
 #endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
 
-struct file *do_filp_open(int dfd, struct filename *pathname,
+static struct file *__do_filp_open(int dfd, struct filename *pathname,
 		const struct open_flags *op)
 {
 	struct nameidata nd;
@@ -3942,6 +3912,53 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
 		filp = path_openat(&nd, op, flags | LOOKUP_REVAL);
 	restore_nameidata();
 	return filp;
+}
+
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+/*
+ * The original SUSFS hook re-entered do_last() inside path_openat() on a file
+ * that had already been opened. On 4.19 do_last() contains
+ *	BUG_ON(file->f_mode & FMODE_OPENED);
+ * so that triggers a kernel BUG as soon as a redirect actually matches.
+ *
+ * Fix: let the first open complete, then drop that file and open the
+ * redirected path from here. The redirected inode also carries the flag, but
+ * its hlist entry is reversed_lookup_only, so the spoof helper returns NULL
+ * and the loop stops. A small depth limit keeps cyclic rules safe.
+ */
+#define SUSFS_OPEN_REDIRECT_MAX_DEPTH 8
+
+static struct file *do_filp_open_redirect(int dfd, struct filename *pathname,
+		const struct open_flags *op)
+{
+	struct file *filp = __do_filp_open(dfd, pathname, op);
+	struct filename *fake_filename;
+	unsigned int depth = 0;
+
+	while (filp && !IS_ERR(filp) && depth++ < SUSFS_OPEN_REDIRECT_MAX_DEPTH) {
+		if (!(SUSFS_IS_INODE_OPEN_REDIRECT_WITHOUT_UID_CHECK(file_inode(filp))))
+			break;
+
+		fake_filename = susfs_open_redirect_spoof_do_sys_openat(file_inode(filp));
+		if (!fake_filename || IS_ERR(fake_filename))
+			break;
+
+		fput(filp);
+		filp = __do_filp_open(dfd, fake_filename, op);
+		putname(fake_filename);
+	}
+	return filp;
+}
+#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+
+struct file *do_filp_open(int dfd, struct filename *pathname,
+		const struct open_flags *op)
+{
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+	return do_filp_open_redirect(dfd, pathname, op);
+#else
+	return __do_filp_open(dfd, pathname, op);
+#endif
 }
 
 struct file *do_file_open_root(struct dentry *dentry, struct vfsmount *mnt,
