@@ -416,7 +416,7 @@ __attribute__((hot)) bool susfs_is_inode_sus_path(struct inode *inode)
 			return false;
 		}
 
-		if (unlikely(test_bit(AS_FLAGS_SUS_PATH, &fi->inode.i_mapping->flags) &&
+		if (unlikely(test_bit(AS_FLAGS_SUS_PATH, &fi->inode.i_state) &&
 			likely(!susfs_is_uid_allowed_for_sus_path(uid))))
 		{
 			//SUSFS_LOGI("hiding path with ino '%lu'\n", inode->i_ino);
@@ -425,7 +425,7 @@ __attribute__((hot)) bool susfs_is_inode_sus_path(struct inode *inode)
 		return false;
 	}
 
-	if (unlikely(test_bit(AS_FLAGS_SUS_PATH, &inode->i_mapping->flags) &&
+	if (unlikely(test_bit(AS_FLAGS_SUS_PATH, &inode->i_state) &&
 		likely(!susfs_is_uid_allowed_for_sus_path(uid))))
 	{
 		//SUSFS_LOGI("hiding path with ino '%lu'\n", inode->i_ino);
