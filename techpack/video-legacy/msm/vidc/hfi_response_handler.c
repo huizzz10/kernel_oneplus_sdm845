@@ -110,6 +110,8 @@ static int hfi_process_sess_evt_seq_changed(u32 device_id,
 	struct hfi_bit_depth *pixel_depth;
 	struct hfi_pic_struct *pic_struct;
 	struct hfi_dpb_counts *dpb_counts;
+	struct hfi_buffer_requirements *buf_req;
+	u32 buf_req_min_cnt = 0;
 	u32 rem_size,entropy_mode = 0;
 	u8 *data_ptr;
 	int prop_id;
@@ -262,10 +264,27 @@ static int hfi_process_sess_evt_seq_changed(u32 device_id,
 					hfi_buffer_requirements)))
 					return -E2BIG;
 				data_ptr = data_ptr + sizeof(u32);
+				buf_req = (struct hfi_buffer_requirements *)
+						data_ptr;
+				/* The firmware leaves buffer_type unset here */
+				buf_req_min_cnt = max(buf_req_min_cnt,
+					buf_req->buffer_count_min);
+				s_vpr_h(sid, "Capture min count: %d\n",
+					buf_req->buffer_count_min);
 				data_ptr +=
 					sizeof(struct hfi_buffer_requirements);
 				rem_size -=
 					sizeof(struct hfi_buffer_requirements);
+				break;
+			case HFI_PROPERTY_PARAM_UNCOMPRESSED_FORMAT_SELECT:
+				if (!validate_pkt_size(rem_size, sizeof(struct
+					hfi_uncompressed_format_select)))
+					return -E2BIG;
+				data_ptr = data_ptr + sizeof(u32);
+				data_ptr +=
+					sizeof(struct hfi_uncompressed_format_select);
+				rem_size -=
+					sizeof(struct hfi_uncompressed_format_select);
 				break;
 			case HFI_INDEX_EXTRADATA_INPUT_CROP:
 				if (!validate_pkt_size(rem_size, sizeof(struct
@@ -340,6 +359,13 @@ static int hfi_process_sess_evt_seq_changed(u32 device_id,
 			num_properties_changed--;
 		} while (num_properties_changed > 0);
 	}
+
+	/*
+	 * Older AR50 firmware reports the output count it needs only in
+	 * the buffer requirements, never go below that.
+	 */
+	event_notify.fw_min_cnt = max(event_notify.fw_min_cnt,
+			buf_req_min_cnt);
 
 	info->response_type = HAL_SESSION_EVENT_CHANGE;
 	info->response.event = event_notify;
