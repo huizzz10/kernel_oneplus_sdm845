@@ -368,7 +368,6 @@ struct dwc3_msm {
 	dma_addr_t		dummy_gsi_db_dma;
 	int			orientation_override;
 	bool			usb_data_enabled;
-	struct delayed_work	vbus_sync_work;
 	bool			vbus_pending_valid;
 	bool			vbus_pending_state;
 	int			vbus_pending_idx;
@@ -2563,7 +2562,6 @@ static int dwc3_msm_suspend(struct dwc3_msm *mdwc, bool enable_wakeup)
 	}
 
 	cancel_delayed_work_sync(&mdwc->perf_vote_work);
-	cancel_delayed_work_sync(&mdwc->vbus_sync_work);
 	msm_dwc3_perf_vote_update(mdwc, false);
 
 	if (!mdwc->in_host_mode) {
@@ -2772,10 +2770,6 @@ static int dwc3_msm_resume(struct dwc3_msm *mdwc)
 	struct usb_irq *uirq;
 
 	dev_dbg(mdwc->dev, "%s: exiting lpm\n", __func__);
-
-	/* re-check the cable state after resuming */
-	schedule_delayed_work(&mdwc->vbus_sync_work,
-			      msecs_to_jiffies(2000));
 
 	/*
 	 * If h/w exited LPM without any events, ensure
@@ -3591,14 +3585,6 @@ static void dwc3_msm_sync_extcon_state(struct dwc3_msm *mdwc)
 	mdwc->vbus_pending_valid = false;
 }
 
-static void dwc3_msm_vbus_sync_work(struct work_struct *work)
-{
-	struct dwc3_msm *mdwc = container_of(work, struct dwc3_msm,
-					     vbus_sync_work.work);
-
-	dwc3_msm_sync_extcon_state(mdwc);
-}
-
 static ssize_t orientation_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
@@ -3881,7 +3867,6 @@ static int dwc3_msm_probe(struct platform_device *pdev)
 	INIT_DELAYED_WORK(&mdwc->sm_work, dwc3_otg_sm_work);
 	INIT_DELAYED_WORK(&mdwc->perf_vote_work, msm_dwc3_perf_vote_work);
 	INIT_DELAYED_WORK(&mdwc->sdp_check, check_for_sdp_connection);
-	INIT_DELAYED_WORK(&mdwc->vbus_sync_work, dwc3_msm_vbus_sync_work);
 
 	mdwc->dwc3_wq = alloc_ordered_workqueue("dwc3_wq", 0);
 	if (!mdwc->dwc3_wq) {
@@ -4179,14 +4164,6 @@ static int dwc3_msm_probe(struct platform_device *pdev)
 			goto put_dwc3;
 
 		/*
-		 * The PD engine may still be coming up at this point. Re-read
-		 * the cable state once it has settled so that a cable already
-		 * plugged in at boot time is not missed.
-		 */
-		schedule_delayed_work(&mdwc->vbus_sync_work,
-				      msecs_to_jiffies(2000));
-
-		/*
 		 * dpdm regulator will be turned on to perform apsd
 		 * (automatic power source detection). dpdm regulator is
 		 * used to float (or high-z) dp/dm lines. Do not reset
@@ -4302,7 +4279,6 @@ static int dwc3_msm_remove(struct platform_device *pdev)
 	cancel_delayed_work_sync(&mdwc->perf_vote_work);
 	msm_dwc3_perf_vote_update(mdwc, false);
 	cancel_delayed_work_sync(&mdwc->sm_work);
-	cancel_delayed_work_sync(&mdwc->vbus_sync_work);
 
 	if (mdwc->hs_phy)
 		mdwc->hs_phy->flags &= ~PHY_HOST_MODE;
